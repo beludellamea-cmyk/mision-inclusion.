@@ -1,79 +1,562 @@
-/* Game rules are independent of drawing and input, for repeatable checks. */
-(function(root){
- const items=['rio','agua','tierra','costa','lupa'],visitors={nico:'pictos',tomas:'partes',marta:'voz'};
- function initial(){return {version:2,started:false,avatar:'luna',area:'mirador',x:115,y:485,found:[],model:0,sign:[null,null],visitors:[],compared:false,prefs:{voice:false,music:false,motion:true,contrast:false,big:false}};}
- function validate(raw){const s=initial();if(!raw||raw.version!==2)return s;s.started=raw.started===true;if(['luna','bruno','sol'].includes(raw.avatar))s.avatar=raw.avatar;if(['mirador','lab','feria'].includes(raw.area))s.area=raw.area;s.x=Number.isFinite(raw.x)?Math.max(50,Math.min(950,raw.x)):115;s.y=Number.isFinite(raw.y)?Math.max(425,Math.min(535,raw.y)):485;s.found=Array.isArray(raw.found)?[...new Set(raw.found.filter(x=>items.includes(x)))]:[];s.model=Number.isInteger(raw.model)?Math.max(0,Math.min(3,raw.model)):0;if(s.model&& !['agua','tierra'].every(i=>s.found.includes(i)))s.model=0;if(s.model>1&&!s.found.includes('lupa'))s.model=1;s.sign=[raw.sign?.[0]==='agua'?'agua':null,raw.sign?.[1]==='tierra'?'tierra':null];s.visitors=s.sign.every(Boolean)&&s.model===3&&Array.isArray(raw.visitors)?[...new Set(raw.visitors.filter(x=>Object.hasOwn(visitors,x)))]:[];s.compared=raw.compared===true;for(const k of Object.keys(s.prefs))if(typeof raw.prefs?.[k]==='boolean')s.prefs[k]=raw.prefs[k];return s;}
- function collect(s,id){if(!items.includes(id)||s.found.includes(id))return false;s.found.push(id);return true;}
- function apply(s,tool){const expected=['agua','lupa','tierra'][s.model];if(!expected||tool!==expected||!s.found.includes(tool))return false;s.model++;return true;}
- function place(s,slot,id){if(s.model!==3||![0,1].includes(slot)||id!==['agua','tierra'][slot]||!s.found.includes(id))return false;s.sign[slot]=id;return true;}
- function help(s,id,support){if(s.model!==3||!s.sign.every(Boolean)||visitors[id]!==support)return false;if(!s.visitors.includes(id))s.visitors.push(id);return true;}
- function quests(s){return [['rio','agua','tierra','costa'].every(i=>s.found.includes(i)),s.model===3,s.sign.every(Boolean)&&s.visitors.length===3];}
- function move(s,dx,dy){s.x=Math.max(50,Math.min(950,s.x+dx));s.y=Math.max(425,Math.min(535,s.y+dy));return {x:s.x,y:s.y};}
- const api={initial,validate,collect,apply,place,help,quests,move,visitors};root.BermejoModel=api;if(typeof module!=='undefined')module.exports=api;
-})(typeof window==='undefined'?globalThis:window);
+/* El mensaje perdido del Bermejo · núcleo: mundo, movimiento, diálogos, sonido y guardado. */
+(function () {
+  'use strict';
+  const M = window.BJM, D = window.BJD, C = window.BJC;
+  const $ = (q, r) => (r || document).querySelector(q);
+  const $$ = (q, r) => Array.from((r || document).querySelectorAll(q));
+  const esc = C.esc;
+  const G = window.BJG = { M, D, C, $, $$, esc, acts: {}, talk: {} };
 
-(function(){
- if(typeof document==='undefined')return;
- const M=window.BermejoModel,A=window.BERMEJO_ASSETS,$=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
- const KEY='bermejo-aventura-v2',areaNames={mirador:'MIRADOR DEL BERMEJO',lab:'LABORATORIO DE LA 479',feria:'FERIA PARA COMPARTIR'},names={luna:'Luna',bruno:'Bruno',sol:'Sol',nico:'Nico',tomas:'Tomás',marta:'Seño Marta'};
- let state=M.initial(),active=null,tool=null,slot=0,feedback='',nearId=null,holdTimer=null,approachTimer=null,lastFocus=null,toastTimer=null,audio=null,musicTimer=null,photosSeen=new Set(),posterURL=null;
- try{state=M.validate(JSON.parse(localStorage.getItem(KEY)||'null'));}catch{}
- if(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)state.prefs.motion=false;
- function save(){try{localStorage.setItem(KEY,JSON.stringify(state));}catch{}}
- function say(t){$('#announcement').textContent=t;$('#toast').textContent=t;$('#toast').classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('visible'),4200);}
- function speak(t){if(!('speechSynthesis'in window)){say('La voz no está disponible. El mensaje también está escrito y tiene imágenes.');return;}speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(t);u.lang='es-AR';u.rate=.88;u.voice=speechSynthesis.getVoices().find(v=>v.lang==='es-AR')||speechSynthesis.getVoices().find(v=>v.lang.startsWith('es'))||null;speechSynthesis.speak(u);}
- function tone(success=true){if(!state.prefs.music)return;try{audio=audio||new(window.AudioContext||window.webkitAudioContext)();audio.resume();const now=audio.currentTime;[success?523.25:392,success?659.25:440,success?783.99:523.25].forEach((hz,i)=>{const o=audio.createOscillator(),g=audio.createGain();o.type='sine';o.frequency.value=hz;g.gain.setValueAtTime(0,now+i*.09);g.gain.linearRampToValueAtTime(.045,now+i*.09+.02);g.gain.exponentialRampToValueAtTime(.0001,now+i*.09+.6);o.connect(g);g.connect(audio.destination);o.start(now+i*.09);o.stop(now+i*.09+.7);});}catch{}}
- function updateMusic(){clearInterval(musicTimer);musicTimer=null;if(!state.prefs.music||document.hidden||!state.started)return;const chord=()=>{try{audio=audio||new(window.AudioContext||window.webkitAudioContext)();audio.resume();[130.81,164.81,196].forEach(hz=>{const o=audio.createOscillator(),g=audio.createGain(),t=audio.currentTime;o.type='sine';o.frequency.value=hz;g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(.006,t+1);g.gain.linearRampToValueAtTime(0,t+5);o.connect(g);g.connect(audio.destination);o.start(t);o.stop(t+5.1);});}catch{}};chord();musicTimer=setInterval(chord,6500);}
- function pic(id,label=true){const p=A.pictos[id];return p?`<span class="picto">${p.src?`<img src="${p.src}" alt="">`:p.svg}${label?`<strong>${esc(p.label)}</strong>`:''}</span>`:'';}
- function character(id,pose='reposo'){return A.chars[id]?.[pose]||A.chars.luna.reposo;}
- function settings(){return `<details class="settings"><summary>⚙ AJUSTES</summary><div>${[['voice','VOZ EN LOS DIÁLOGOS'],['music','MÚSICA Y SONIDOS'],['motion','MOVIMIENTO'],['contrast','ALTO CONTRASTE'],['big','LETRA GRANDE']].map(([k,l])=>`<label><input type="checkbox" data-pref="${k}" ${state.prefs[k]?'checked':''}>${l}</label>`).join('')}</div></details>`;}
- function applyPrefs(){document.body.classList.toggle('contrast',state.prefs.contrast);document.body.classList.toggle('quiet',!state.prefs.motion);document.body.classList.toggle('big',state.prefs.big);}
- function shell(inner){$('#game').innerHTML=`<header class="topbar"><button class="plain" data-action="home">← MISIÓN INCLUSIÓN</button><strong>≈ MISIÓN BERMEJO</strong><div>${settings()}</div></header>${inner}<footer class="credits"><span>OCTUBRE · MES DE LA INCLUSIÓN · E.P.E.E N.º 3 · ESCUELA 479</span><details><summary>CRÉDITOS</summary><p>Pictogramas: Sergio Palao · ARASAAC · Gobierno de Aragón · CC BY-NC-SA. <a href="https://arasaac.org" target="_blank" rel="noopener">ARASAAC</a>. Personajes y mundo: Misión Inclusión. El mapa y las escenas son ilustraciones del juego, basadas en el proyecto «El río se lleva mi pueblo».</p></details></footer>`;applyPrefs();}
- function intro(){shell(`<main class="cover"><div class="cover-art">${landscape('mirador')}<div class="cover-char c1">${character('luna','saluda')}</div><div class="cover-char c2">${character('bruno','festeja')}</div><div class="cover-char c3">${character('sol','saluda')}</div><span class="cover-badge">EXPLORÁ · DESCUBRÍ · COMPARTÍ</span></div><section class="cover-copy"><p class="kicker">EL RÍO SE LLEVA MI PUEBLO</p><h1>Una aventura<br>para <em>comunicar</em></h1><p>La feria necesita nuestro mensaje. Reuní pictogramas, investigá en el laboratorio y ayudá a que todos comprendan lo que descubrimos.</p><fieldset class="avatar-picker"><legend>ELEGÍ TU PERSONAJE</legend>${['luna','bruno','sol'].map(id=>`<label><input type="radio" name="avatar" value="${id}" ${state.avatar===id?'checked':''}><span>${character(id,'saluda')}<strong>${names[id]}</strong></span></label>`).join('')}</fieldset><button class="primary big-button" data-action="start">${state.started?'CONTINUAR MI AVENTURA':'¡SALIR A EXPLORAR!'} →</button><p class="small">FLECHAS O BOTONES PARA MOVERTE · TAMBIÉN PODÉS TOCAR LOS OBJETOS · SIN RELOJ</p></section></main>`);}
- function tree(x,y,s=1){return `<g transform="translate(${x} ${y}) scale(${s})"><ellipse cy="5" rx="60" ry="13" fill="#2f5236" opacity=".13"/><path d="M-7 0V-100h15V0Z" fill="#9d6844"/><path d="M1-65-28-88M2-90l21-20" stroke="#8d593b" stroke-width="9"/><path d="M-48-107c-30-40 2-83 30-72 6-29 62-28 67 6 39 4 49 58 15 71-1 35-58 34-66 17-26 19-56 2-46-22Z" fill="#7eb96c" stroke="#477d55" stroke-width="3"/><path d="M-34-146q22-27 40-16" fill="none" stroke="#b1d48a" stroke-width="12" stroke-linecap="round"/></g>`;}
- function house(x,y,color='#f6d3a5'){return `<g transform="translate(${x} ${y})"><rect x="-49" y="-75" width="98" height="75" rx="4" fill="${color}" stroke="#8e7165" stroke-width="3"/><path d="m-62-73 62-45 62 45Z" fill="#bb7369" stroke="#8e6162" stroke-width="3"/><path d="M-12 0v-45h24V0" fill="#8e9dc3"/><rect x="-38" y="-56" width="22" height="24" fill="#d9f4ff"/><path d="M-27-56v24m-11-12h22" stroke="white" stroke-width="3"/></g>`;}
- function landscape(area){const lab=area==='lab',fair=area==='feria';return `<svg class="landscape" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 560" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><defs><linearGradient id="sky" x2="0" y2="1"><stop stop-color="#afdaef"/><stop offset="1" stop-color="#e8f6ee"/></linearGradient><linearGradient id="water" x2="0" y2="1"><stop stop-color="#ac987c"/><stop offset="1" stop-color="#728e9d"/></linearGradient></defs>${lab?`<rect width="1000" height="560" fill="#f9e6c8"/><path d="M0 350H1000V560H0Z" fill="#e7cfae"/><path d="M0 350H1000M0 420H1000M0 510H1000M250 350 110 560M500 350v210M750 350l140 210" stroke="#cbb69c" stroke-width="2"/><rect x="35" y="50" width="300" height="170" rx="8" fill="#95c0d1" stroke="#fdf4e1" stroke-width="13"/><path d="M185 50v170M35 135h300" stroke="#fff3df" stroke-width="10"/><rect x="400" y="48" width="480" height="172" rx="12" fill="#477369" stroke="#ba9066" stroke-width="14"/><text x="640" y="106" text-anchor="middle" fill="#fff6d4" font-family="Arial" font-size="24" font-weight="bold">LABORATORIO 479</text><text x="640" y="151" text-anchor="middle" fill="#d3ead6" font-family="Arial" font-size="19">OBSERVAMOS · PROBAMOS · CONTAMOS</text><rect x="65" y="296" width="670" height="30" rx="8" fill="#b4835a"/><path d="M100 326v95m600-95v95" stroke="#8c6447" stroke-width="18"/><rect x="65" y="250" width="670" height="47" rx="5" fill="#d6a873"/>`:`<rect width="1000" height="560" fill="url(#sky)"/><circle cx="872" cy="65" r="33" fill="#ffe093"/><g class="clouds" fill="#ffffff" opacity=".8"><ellipse cx="150" cy="59" rx="75" ry="20"/><ellipse cx="185" cy="43" rx="39" ry="28"/><ellipse cx="620" cy="82" rx="80" ry="20"/></g><path d="M0 166q125-82 250-12t250-5 250-5 250-18v255H0Z" fill="#9abd8a"/><path d="M0 185q130-20 260 11t210-16 280 6 250-11v169H0Z" fill="url(#water)"/><g class="river-waves" fill="none" stroke="#dfd7c1" stroke-width="4" opacity=".6"><path d="M50 230q60-14 120 0m100 25q60-14 120 0m100-25q60-14 120 0m100 22q60-14 120 0m60-40q40-9 80 0"/></g><path d="M0 310q150-35 280-15t210-5 260 8 250-18v280H0Z" fill="#abc58c"/><path d="M0 380q230-45 470-6t530-5v191H0Z" fill="#c8d8a4"/><path d="M0 446q220-35 460 0t540-13v110H0Z" fill="#e8d7b3"/><path d="M0 451q220-35 460 0t540-13" stroke="#efe7ce" stroke-width="9" fill="none"/>${house(73,165)}${house(230,165,'#e8d7b2')}${house(375,161,'#f4deaa')}${tree(933,380,.95)}${tree(53,375,.7)}<path d="M80 328v47m65-53v47m65-52v47m65-50v47m65-48v47m65-46v47m65-45v47m65-43v47m65-45v47m65-46v47m65-49v47m65-49v47m65-48v47" stroke="#90745c" stroke-width="7"/><path d="M80 341q350-55 780-19" fill="none" stroke="#b89974" stroke-width="9"/>`}${fair?`<g><rect x="50" y="185" width="650" height="190" rx="8" fill="#fbe8bc" stroke="#ab815f" stroke-width="4"/><path d="M25 184 100 130h550l75 54Z" fill="#a379c6"/><path d="M100 131v52m100-52v52m100-52v52m100-52v52m100-52v52m100-52v52" stroke="#f1ce76" stroke-width="46"/><rect x="62" y="335" width="625" height="40" fill="#bb8a66"/><text x="375" y="222" text-anchor="middle" font-family="Arial" font-size="21" font-weight="bold" fill="#553d6e">FERIA: EL RÍO SE LLEVA MI PUEBLO</text><path d="M40 80q450 85 920-5" stroke="#826d8c" stroke-width="3" fill="none"/>${Array.from({length:12},(_,i)=>`<path d="m${75+i*73} ${92+Math.sin(i/3)*22} 19 38 19-37Z" fill="${['#eaa5ae','#ecd077','#94c3c9','#b7a1d4'][i%4]}"/>`).join('')}</g>`:''}</svg>`;}
- const spots={mirador:[{id:'rio',x:170,y:270,label:'El río',icon:'rio',type:'find'},{id:'agua',x:350,y:306,label:'El agua',icon:'agua',type:'find'},{id:'costa',x:555,y:345,label:'La costa',icon:'costa',type:'find'},{id:'tierra',x:730,y:383,label:'La tierra',icon:'tierra',type:'find'},{id:'guia',x:885,y:460,label:'Hablar con Marta',char:'marta',type:'guide'}],lab:[{id:'maqueta',x:230,y:318,label:'Probar la maqueta',emoji:'🌊',type:'model'},{id:'lupa',x:520,y:312,label:'Encontrar la lupa',icon:'lupa',type:'find'},{id:'fotos',x:710,y:314,label:'Antes y después',emoji:'📷',type:'photos'},{id:'guia',x:890,y:460,label:'Hablar con Marta',char:'marta',type:'guide'}],feria:[{id:'cartel',x:210,y:315,label:'Armar el cartel',emoji:'🖼',type:'sign'},{id:'nico',x:440,y:462,label:'Hablar con Nico',char:'nico',type:'visitor'},{id:'tomas',x:655,y:462,label:'Hablar con Tomás',char:'tomas',type:'visitor'},{id:'marta',x:860,y:462,label:'Hablar con Marta',char:'marta',type:'visitor'}]};
- function doneSpot(s){return s.type==='find'?state.found.includes(s.id):s.type==='model'?state.model===3:s.type==='sign'?state.sign.every(Boolean):s.type==='visitor'?state.visitors.includes(s.id):s.type==='photos'?state.compared:false;}
- function currentObjective(){if(!M.quests(state)[0])return 'BUSCÁ 4 PICTOGRAMAS EN EL MIRADOR.';if(state.model<3)return 'LLEVÁ TU MOCHILA AL LABORATORIO Y PROBÁ LA MAQUETA.';if(!state.sign.every(Boolean))return 'ARMÁ EL CARTEL EN LA FERIA.';if(state.visitors.length<3)return 'COMPARTÍ EL MENSAJE CON LOS 3 VISITANTES.';return '¡LA FERIA ESTÁ LISTA! YA PODÉS VER TU AFICHE.';}
- function world(){stopWalking();const qs=M.quests(state);shell(`<main class="adventure"><div class="world-heading"><div><p class="kicker">EL RÍO SE LLEVA MI PUEBLO</p><h1>${areaNames[state.area]}</h1></div><button class="quest-button" data-action="quests">★ ${qs.filter(Boolean).length}/3 MISIONES</button></div><nav class="places" aria-label="Lugares para explorar">${Object.entries(areaNames).map(([k,n])=>`<button data-action="area" data-id="${k}" aria-current="${state.area===k?'location':'false'}">${k==='mirador'?'≈ MIRADOR':k==='lab'?'⚗ LABORATORIO':'⚑ FERIA'} ${qs[{mirador:0,lab:1,feria:2}[k]]?'✓':''}</button>`).join('')}</nav><div class="objective" id="objective">${esc(currentObjective())}</div><div class="world-viewport" id="world-viewport" tabindex="0" role="region" aria-label="Mundo para explorar. Usá las flechas para moverte, E para interactuar, espacio para festejar. También podés tocar los objetos."><div class="world-track" id="world-track"><div class="world-scene" id="world-scene">${landscape(state.area)}${spots[state.area].map(s=>`<button class="hotspot ${s.char?'person':''} ${doneSpot(s)?'found':''}" data-action="spot" data-id="${s.id}" style="left:${s.x}px;top:${s.y}px" aria-label="${esc(s.label)}${doneSpot(s)?', completado':''}">${s.char?character(s.char,doneSpot(s)?'saluda':'reposo'):s.icon?pic(s.icon,false):`<span class="object-emoji">${s.emoji}</span>`}<span class="hotspot-label">${doneSpot(s)?'✓ ':''}${s.label}</span>${!doneSpot(s)?'<i aria-hidden="true">✦</i>':''}</button>`).join('')}<div class="player" id="player" aria-hidden="true">${character(state.avatar)}<span>${names[state.avatar]}</span></div>${state.area==='feria'&&state.sign.every(Boolean)?`<div class="placed-sign" aria-label="Cartel con pictogramas">${pic('agua',false)}<b>DESGASTA</b>${pic('tierra',false)}</div>`:''}</div></div></div><div class="world-bottom"><div class="dpad" aria-label="Mover al personaje"><button data-move="up" aria-label="Caminar hacia arriba">↑</button><button data-move="left" aria-label="Caminar a la izquierda">←</button><button data-move="down" aria-label="Caminar hacia abajo">↓</button><button data-move="right" aria-label="Caminar a la derecha">→</button></div><div class="world-actions"><button class="primary" data-action="interact" id="interact">EXPLORAR / HABLAR</button><button data-action="jump">★ FESTEJAR</button><button data-action="bag">🎒 MOCHILA <b>${state.found.length}</b></button>${qs.every(Boolean)?'<button class="gold" data-action="finish">¡VER NUESTRO AFICHE! →</button>':''}</div></div><p class="world-hint" id="near-hint">Tocá un objeto o caminá y usá EXPLORAR. Podés desplazarte por el escenario.</p></main>`);updatePlayer(true);}
- function updatePlayer(center=false){const p=$('#player'),vp=$('#world-viewport');if(!p||!vp)return;const scale=Math.max(.68,Math.min(1,vp.clientWidth/1000));$('#world-track').style.width=1000*scale+'px';$('#world-track').style.height=560*scale+'px';$('#world-scene').style.transform='scale('+scale+')';vp.style.height=(560*scale+6)+'px';p.style.left=state.x+'px';p.style.top=state.y+'px';let nearest=spots[state.area].slice().sort((a,b)=>Math.abs(a.x-state.x)-Math.abs(b.x-state.x))[0];nearId=Math.abs(nearest.x-state.x)<130?nearest.id:null;document.querySelectorAll('.hotspot').forEach(b=>b.classList.toggle('near',b.dataset.id===nearId));$('#interact').textContent=nearId?nearest.label.toUpperCase():'EXPLORAR / HABLAR';$('#near-hint').textContent=nearId?'CERCA: '+nearest.label+'. TOCÁ EXPLORAR O PRESIONÁ E.':'MOVETE CON LAS FLECHAS O TOCÁ UN OBJETO PARA ACERCARTE.';const x=state.x*scale;if(center||x<vp.scrollLeft+70||x>vp.scrollLeft+vp.clientWidth-70)vp.scrollLeft=Math.max(0,x-vp.clientWidth/2);}
- function walk(dir){const delta={left:[-23,0],right:[23,0],up:[0,-16],down:[0,16]}[dir];if(!delta||active||!$('#player'))return;M.move(state,...delta);$('#player').classList.add('walking');updatePlayer();save();clearTimeout(walk.t);walk.t=setTimeout(()=>$('#player')?.classList.remove('walking'),140);}
- function stopWalking(){clearInterval(holdTimer);holdTimer=null;}
- function approach(id){const s=spots[state.area].find(o=>o.id===id);if(!s)return;clearTimeout(approachTimer);state.x=s.x;state.y=490;updatePlayer(true);save();approachTimer=setTimeout(()=>open(s.type,s.id),state.prefs.motion?220:0);}
- function jump(){const p=$('#player');if(!p)return;p.classList.remove('jump');void p.offsetWidth;p.classList.add('jump');setTimeout(()=>p.classList.remove('jump'),650);tone();}
- function open(type,id){stopWalking();clearTimeout(approachTimer);lastFocus=document.activeElement;active={type,id};feedback='';tool=null;photosSeen=new Set();renderActivity();if(!$('#activity').open)$('#activity').showModal();$('#activity-close').focus();if(state.prefs.voice)speak($('#activity-title').textContent+'. '+($('#activity-content p')?.textContent||''));}
- function close(){if(!active)return;active=null;$('#activity').close();window.speechSynthesis?.cancel();world();$('#world-viewport')?.focus({preventScroll:true});}
- function feedbackHTML(){return `<p class="feedback" id="activity-feedback" role="status">${esc(feedback)}</p>`;}
- function note(title,body){$('#activity-title').textContent=title;$('#activity-content').innerHTML=body;}
- const discoveries={rio:['EL RÍO BERMEJO','El río cambia con el tiempo. En el proyecto investigamos qué pasa con su costa.'],agua:['EL AGUA','La corriente puede desgastar la base del terreno. Esta imagen nos ayuda a hablar del agua.'],tierra:['LA TIERRA','La tierra forma parte de la costa. Cuando pierde sostén, puede desprenderse.'],costa:['LA COSTA','Es la parte de tierra que está junto al río. En la feria comparamos sus cambios.'],lupa:['UNA LUPA PARA INVESTIGAR','¡Encontraste una herramienta! Usala para mirar la base de la barranca en la maqueta.']};
- function modelSVG(stage=0){return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 300" role="img" aria-label="Maqueta del río y la barranca, momento ${stage+1}"><rect width="640" height="300" rx="20" fill="#deeff7"/><path d="M0 173q210-25 640 0v127H0Z" fill="#91afbd"/><path d="${stage<1?'M0 92H392V265H0Z':stage<2?'M0 92H392L387 149L346 178L339 220L367 265H0Z':'M0 92H329L319 155L298 185L320 265H0Z'}" fill="#c89b6d" stroke="#6d5362" stroke-width="4"/><path d="M0 92H${stage<2?392:329}" stroke="#91b775" stroke-width="14"/><g ${stage>1?'transform="rotate(10 316 90)"':''}><rect x="295" y="43" width="39" height="63" rx="4" fill="#9fa9b7" stroke="#514460" stroke-width="4"/><path d="M302 57h24m-24 15h24m-24 15h24" stroke="#d9dfe8" stroke-width="4"/></g><text x="295" y="29" font-family="Arial" font-size="17" fill="#443353">BARRERA</text><text x="118" y="181" font-family="Arial" font-size="23" fill="#443353" font-weight="bold">TIERRA</text><text x="500" y="254" font-family="Arial" font-size="23" fill="#324965" font-weight="bold">AGUA</text><path class="current-arrow" d="M560 203H${stage<1?412:370}l19-12m-19 12 19 12" fill="none" stroke="#4c7996" stroke-width="6" stroke-linecap="round"/>${stage>1?'<path d="m373 169 27 11 10 35-35 9-19-31Z" fill="#c89b6d" stroke="#6d5362" stroke-width="4"/>':''}${stage===1?'<circle cx="362" cy="169" r="45" fill="none" stroke="#efd067" stroke-width="7" stroke-dasharray="10 6"/>':''}</svg>`;}
- function renderActivity(){if(!active)return;const {type,id}=active;
- if(type==='find'){const d=discoveries[id];note(d[0],`<div class="discovery">${pic(id)}<p>${d[1]}</p><button class="primary" data-action="collect" data-id="${id}">${state.found.includes(id)?'✓ YA ESTÁ EN TU MOCHILA':'🎒 GUARDAR EN MI MOCHILA'}</button></div>`);}
- if(type==='guide'){note('MARTA · TU EQUIPO DE INVESTIGACIÓN',`<div class="character-dialog">${character('marta','saluda')}<div><p>«La misión es compartir lo que investigamos para que más personas puedan comprenderlo.»</p><p>${currentObjective()}</p><button data-action="quests">VER MIS MISIONES</button></div></div>`);}
- if(type==='bag'){note('MI MOCHILA DE EXPLORACIÓN',`<p>Tocá una imagen para escuchar qué representa. Las usamos para contar lo que descubrimos.</p><div class="bag-grid">${state.found.map(i=>`<button data-action="say-item" data-id="${i}">${pic(i)}</button>`).join('')||'<p>Tu mochila espera los primeros descubrimientos. Explorá el mirador.</p>'}</div><p class="small">PICTOGRAMAS: SERGIO PALAO · ARASAAC · GOBIERNO DE ARAGÓN · CC BY-NC-SA.</p>`);}
- if(type==='quests'){const q=M.quests(state);note('EL MAPA DE NUESTRA MISIÓN',`<div class="quest-list">${[['mirador','1. EXPLORAR','Reuní los pictogramas de RÍO, AGUA, TIERRA y COSTA.'],['lab','2. INVESTIGAR','Encontrá la lupa y probá las herramientas en la maqueta.'],['feria','3. COMPARTIR','Armá un cartel y conversá con los tres visitantes.']].map(([a,t,d],i)=>`<button data-action="go-area" data-id="${a}"><span>${q[i]?'✓':'☆'}</span><strong>${t}</strong><p>${d}</p></button>`).join('')}</div><p>Podés recorrer los lugares en el orden que quieras. Las herramientas que encontrás te ayudan a seguir.</p>`);}
- if(type==='model'){const ready=['agua','tierra'].every(i=>state.found.includes(i)),expected=['agua','lupa','tierra'][state.model];note('EL LABORATORIO · PROBÁ LA MAQUETA',ready?`<p class="prompt">${['1. ELEGÍ AGUA Y HACELA CORRER POR EL CAUCE.','2. BUSCÁ LA LUPA Y OBSERVÁ LA BASE.','3. ELEGÍ TIERRA Y MARCÁ EL DESPRENDIMIENTO.','¡YA PODEMOS EXPLICAR LO QUE OBSERVAMOS!'][state.model]}</p><button class="model-target" data-action="apply-model" data-drop="model" aria-label="Usar la herramienta elegida en la maqueta" aria-describedby="activity-feedback">${modelSVG(Math.min(state.model,2))}<span>${state.model===3?'✓ EXPERIENCIA COMPLETA':tool?'USAR '+A.pictos[tool].label+' ACÁ':'ELEGÍ UNA HERRAMIENTA'}</span></button><div class="tools" aria-label="Herramientas para la maqueta">${['agua','lupa','tierra'].map(i=>`<button aria-label="Elegir herramienta ${A.pictos[i].label}" draggable="${state.found.includes(i)}" data-drag="${i}" data-action="tool" data-id="${i}" aria-pressed="${tool===i}" ${state.found.includes(i)?'':'disabled'}>${pic(i)}${!state.found.includes(i)?'<small>BUSCAR EN EL LABORATORIO</small>':''}</button>`).join('')}</div>${feedbackHTML()}${state.model===3?'<div class="success"><strong>¡DESCUBRIMIENTO GUARDADO!</strong><p>El agua puede desgastar la base, la barranca pierde sostén y puede desprenderse tierra. Esto también puede afectar el terreno que sostiene las barreras.</p><button class="primary" data-action="go-area" data-id="feria">LLEVAR EL MENSAJE A LA FERIA →</button></div>':'<p class="small">Podés arrastrar una herramienta o tocarla y después tocar la maqueta. Es una ilustración de la experiencia del proyecto.</p>'}`:`<p>Primero necesitamos los pictogramas de AGUA y TIERRA. Están en el mirador. ¡Vamos a encontrarlos!</p><button class="primary" data-action="go-area" data-id="mirador">EXPLORAR EL MIRADOR →</button>`);}
- if(type==='photos'){note('OBSERVATORIO · ANTES Y DESPUÉS',`<p>Mové la ventana para comparar las dos ilustraciones. ¿Qué cambió en la costa?</p><div class="comparison"><div>${modelSVG(2)}</div><div id="photo-before" style="clip-path:inset(0 50% 0 0)">${modelSVG(0)}</div><b class="before-label">ANTES</b><b class="after-label">DESPUÉS</b></div><label class="slider-label" for="photo-slider">DESLIZÁ PARA EXPLORAR<input id="photo-slider" type="range" min="0" max="100" value="50"></label><p id="photo-status" role="status">PROBÁ LLEVAR LA VENTANA HASTA LOS DOS EXTREMOS.</p><p class="small">Ilustraciones del juego para comparar cambios; no son fotografías del lugar.</p>`);}
- if(type==='sign'){const ready=state.model===3;note('EL TALLER · ARMÁ EL MENSAJE',ready?`<p>Tocá un espacio y elegí la imagen que falta. También podés arrastrarla desde la mochila.</p><div class="sign-builder"><span>EL</span><button data-action="slot" data-id="0" data-drop="0" aria-pressed="${slot===0}" aria-label="Espacio para AGUA">${state.sign[0]?pic('agua'):'<b>?</b><strong>AGUA</strong>'}</button><strong>DESGASTA</strong><span>LA</span><button data-action="slot" data-id="1" data-drop="1" aria-pressed="${slot===1}" aria-label="Espacio para TIERRA">${state.sign[1]?pic('tierra'):'<b>?</b><strong>TIERRA</strong>'}</button></div><div class="tools">${['rio','agua','tierra','costa'].filter(i=>state.found.includes(i)).map(i=>`<button aria-label="Elegir pictograma ${A.pictos[i].label}" draggable="true" data-drag="${i}" data-action="sign-picto" data-id="${i}">${pic(i)}</button>`).join('')}</div>${feedbackHTML()}${state.sign.every(Boolean)?'<div class="success"><strong>¡EL CARTEL YA TIENE PICTOGRAMAS!</strong><p>Ahora visitá a Nico, Tomás y Marta. Probemos otras maneras de compartirlo.</p><button class="primary" data-action="close">COLOCAR EL CARTEL EN LA FERIA →</button></div>':''}`:'<p>El equipo quiere entender qué ocurre antes de preparar el mensaje. Llevá AGUA y TIERRA al laboratorio y probá la maqueta.</p><button class="primary" data-action="go-area" data-id="lab">IR AL LABORATORIO →</button>');}
- if(type==='visitor'){const ready=state.sign.every(Boolean),requests={nico:'¿Me mostrás imágenes para acompañar el mensaje?',tomas:'¿Lo podemos leer de a una idea por vez?',marta:'¿Podemos escuchar la explicación también?'};note(names[id].toUpperCase()+' · COMPARTIMOS LA FERIA',ready?`<div class="character-dialog">${character(id,state.visitors.includes(id)?'saluda':'reposo')}<div><p class="speech">«${requests[id]}»</p><p>Elegí cómo acompañar el mensaje que creaste.</p></div></div><div class="support-tools">${[['pictos','comunicar','MOSTRAR PICTOGRAMAS'],['partes','leer','LEER POR PARTES'],['voz','escuchar','ESCUCHAR']].map(([s,i,l])=>`<button data-action="support" data-id="${s}">${pic(i,false)}<strong>${l}</strong></button>`).join('')}</div>${feedbackHTML()}${active.result?`<div class="visitor-result" tabindex="-1">${active.result==='pictos'?`<div class="pictogram-message">${pic('agua')}<strong>DESGASTA</strong>${pic('tierra')}</div>`:active.result==='partes'?'<ol><li>EL AGUA SE MUEVE.</li><li>EL AGUA DESGASTA LA BASE DE LA COSTA.</li><li>PUEDE DESPRENDERSE TIERRA.</li></ol>':'<p>EL AGUA PUEDE DESGASTAR LA BASE DE LA COSTA. PUEDE DESPRENDERSE TIERRA. ESTO PUEDE AFECTAR EL SOSTÉN DE LAS BARRERAS.</p>'}<p>«¡Gracias por compartir tu mensaje conmigo!»</p><button class="primary" data-action="${M.quests(state).every(Boolean)?'finish':'close'}">${M.quests(state).every(Boolean)?'¡LA FERIA ESTÁ LISTA! →':'SEGUIR COMPARTIENDO →'}</button></div>`:''}`:`<p>«Todavía falta nuestro cartel. ¿Ayudamos al equipo a prepararlo?»</p><button class="primary" data-action="go-sign">ARMAR EL CARTEL →</button>`);}
- }
- function celebrate(){tone();if(!state.prefs.motion)return;const box=document.createElement('div');box.className='confetti';box.setAttribute('aria-hidden','true');box.innerHTML=Array.from({length:24},(_,i)=>`<i style="--x:${(i*47)%100}%;--r:${i*33}deg;--d:${i%7*.04}s;background:${['#e5b361','#a3cfa8','#ba9cda','#92c6dd'][i%4]}"></i>`).join('');document.body.appendChild(box);setTimeout(()=>box.remove(),1800);}
- function collect(id){const added=M.collect(state,id);save();feedback='';renderActivity();say(added?'¡'+A.pictos[id].label+' EN TU MOCHILA!':'YA TENÉS ESTA IMAGEN. PODÉS SEGUIR EXPLORANDO.');if(added)celebrate();if(M.quests(state)[0]&&added)say('¡REUNISTE LOS 4 PICTOGRAMAS! EL LABORATORIO TE ESPERA.');}
- function useModel(id=tool){if(state.model===3)return;if(!id){feedback='PRIMERO ELEGÍ UNA HERRAMIENTA DE TU MOCHILA.';}else if(M.apply(state,id)){feedback=['','¡EL AGUA YA CORRE! AHORA BUSQUEMOS LA LUPA.','¡MIRÁ LA BASE! EL AGUA DESGASTÓ PARTE DEL TERRENO.','¡ASÍ SE PUEDE DESPRENDER LA TIERRA! YA TENEMOS UNA EXPLICACIÓN.'][state.model];tool=null;tone();if(state.model===3)celebrate();}else feedback='PROBEMOS OTRA HERRAMIENTA. MIRÁ LA CONSIGNA DE ARRIBA: AGUA, LUPA Y DESPUÉS TIERRA.';save();renderActivity();$('.model-target')?.focus({preventScroll:true});}
- function placeSign(id,target=slot){if(M.place(state,target,id)){feedback='¡ESTA IMAGEN AYUDA A CONTAR EL MENSAJE!';slot=state.sign[0]?1:0;tone();if(state.sign.every(Boolean))celebrate();}else feedback='ESA IMAGEN CUENTA OTRA IDEA. BUSCAMOS '+(target===0?'AGUA':'TIERRA')+'. PODÉS PROBAR OTRA VEZ.';save();renderActivity();document.querySelector(`[data-action="slot"][data-id="${slot}"]`)?.focus({preventScroll:true});}
- function support(id){if(M.help(state,active.id,id)){active.result=id;feedback='¡SUMAMOS OTRA MANERA DE COMPRENDER!';save();renderActivity();$('.visitor-result')?.focus({preventScroll:true});celebrate();if(id==='voz')speak('El agua puede desgastar la base de la costa. Puede desprenderse tierra. Esto puede afectar el terreno que sostiene las barreras.');}else{feedback='ES UNA FORMA ÚTIL DE COMUNICAR. ESCUCHEMOS QUÉ NOS PIDIÓ '+names[active.id].toUpperCase()+' Y PROBEMOS ESE APOYO.';renderActivity();}}
- function goArea(area){if(!areaNames[area])return;active=null;$('#activity').close();stopWalking();clearTimeout(approachTimer);state.area=area;state.x=115;state.y=485;save();world();$('#world-viewport').focus({preventScroll:true});say(areaNames[area]+'. '+currentObjective());}
- function finale(){if(!M.quests(state).every(Boolean)){say('TODAVÍA QUEDAN DESCUBRIMIENTOS PARA COMPARTIR. MIRÁ TUS MISIONES.');return;}active=null;$('#activity').close();stopWalking();shell(`<main class="finale"><p class="kicker">¡MISIÓN CUMPLIDA!</p><h1>¡Nuestra feria<br><em>comunica!</em></h1><div class="final-characters">${['luna','bruno','sol'].map(i=>character(i,'festeja')).join('')}</div><p>Exploramos, investigamos y buscamos distintas maneras de compartir lo que aprendimos. ¡Ahora llevamos el mensaje a la escuela!</p><div class="poster-preview"><h2>EL RÍO SE LLEVA MI PUEBLO</h2><div class="pictogram-message">${pic('agua')}<strong>DESGASTA</strong>${pic('tierra')}</div><strong>EL AGUA DESGASTA LA TIERRA.</strong><div class="poster-scene">${modelSVG(1)}</div><p>EL AGUA PUEDE DESGASTAR LA BASE DE LA COSTA.<br>ESTO PUEDE AFECTAR EL TERRENO QUE SOSTIENE LAS BARRERAS.</p><small>PICTOGRAMAS: SERGIO PALAO · ARASAAC · GOBIERNO DE ARAGÓN · CC BY-NC-SA</small></div><div class="final-actions"><button class="primary" data-action="download">↓ GUARDAR AFICHE PNG</button><button class="gold" data-action="print">IMPRIMIR / GUARDAR PDF</button><button data-action="back-world">SEGUIR EXPLORANDO</button><button data-action="restart">NUEVA AVENTURA</button></div></main>`);celebrate();say('¡MISIÓN CUMPLIDA! NUESTRA FERIA COMUNICA.');window.scrollTo(0,0);}
- async function posterBlob(){const cv=document.createElement('canvas');cv.width=1800;cv.height=2200;const c=cv.getContext('2d');c.fillStyle='white';c.fillRect(0,0,1800,2200);c.strokeStyle='#40305b';c.lineWidth=8;c.strokeRect(35,35,1730,2130);c.textAlign='center';c.fillStyle='#40305b';c.font='bold 65px Arial';c.fillText('EL RÍO SE LLEVA MI PUEBLO',900,145);c.font='bold 32px Arial';c.fillText('ESCUELA 479 · MES DE LA INCLUSIÓN',900,205);async function img(src){const i=new Image();i.src=src;await i.decode();return i;}const water=await img(A.pictos.agua.src),soil=await img(A.pictos.tierra.src);c.drawImage(water,210,280,390,390);c.drawImage(soil,1200,280,390,390);c.font='bold 56px Arial';c.fillText('DESGASTA',900,500);c.font='bold 38px Arial';c.fillText('AGUA',405,735);c.fillText('TIERRA',1395,735);c.font='bold 59px Arial';c.fillText('EL AGUA DESGASTA LA TIERRA.',900,865);const svg=await img('data:image/svg+xml;charset=utf-8,'+encodeURIComponent(modelSVG(1)));c.drawImage(svg,140,950,1520,713);c.font='bold 36px Arial';['EL AGUA PUEDE DESGASTAR LA BASE DE LA COSTA.','ESTO PUEDE AFECTAR EL TERRENO','QUE SOSTIENE LAS BARRERAS.'].forEach((l,i)=>c.fillText(l,900,1780+i*60));c.font='27px Arial';c.fillText('Compartir lo que aprendemos también es incluir.',900,2040);c.font='20px Arial';c.fillText('Pictogramas: Sergio Palao · ARASAAC · Gobierno de Aragón · CC BY-NC-SA',900,2095);return new Promise((resolve,reject)=>cv.toBlob(b=>b?resolve(b):reject(Error('png')),'image/png'));}
- async function exportPoster(print=false){try{const b=await posterBlob();if(posterURL)URL.revokeObjectURL(posterURL);posterURL=URL.createObjectURL(b);if(print){$('#print').innerHTML=`<img src="${posterURL}" alt="Afiche del proyecto El río se lleva mi pueblo">`;await $('#print img').decode();window.print();}else{const a=document.createElement('a');a.href=posterURL;a.download='Mision_Bermejo_nuestro_mensaje.png';a.click();say('¡AFICHE LISTO PARA COMPARTIR E IMPRIMIR!');}}catch{say('NO PUDIMOS PREPARAR LA IMAGEN. PROBÁ OTRA VEZ.');}}
- function home(){stopWalking();clearTimeout(approachTimer);clearInterval(musicTimer);window.speechSynthesis?.cancel();if(window.parent!==window){window.parent.postMessage({type:'bermejo:home'},location.origin);}else location.href='../';}
- document.addEventListener('click',e=>{const b=e.target.closest('[data-action],[data-move]');if(!b||b.disabled)return;if(b.dataset.move){if(e.detail===0)walk(b.dataset.move);return;}const id=b.dataset.id;switch(b.dataset.action){case'home':home();break;case'start':state.started=true;save();world();updateMusic();open('guide','guia');break;case'area':goArea(id);break;case'go-area':goArea(id);break;case'spot':approach(id);break;case'interact':if(nearId)approach(nearId);else say('ACERCATE A UN OBJETO O TOCALO DIRECTAMENTE.');break;case'jump':jump();break;case'bag':open('bag');break;case'quests':open('quests');break;case'collect':collect(id);break;case'close':close();break;case'say-item':speak(A.pictos[id].label);break;case'tool':tool=id;renderActivity();document.querySelector(`[data-action="tool"][data-id="${id}"]`)?.focus();break;case'apply-model':useModel();break;case'slot':slot=+id;renderActivity();break;case'sign-picto':placeSign(id);break;case'support':support(id);break;case'go-sign':open('sign','cartel');break;case'finish':finale();break;case'download':exportPoster();break;case'print':exportPoster(true);break;case'back-world':world();break;case'restart':state={...M.initial(),prefs:{...state.prefs}};save();intro();clearInterval(musicTimer);break;}});
- document.addEventListener('change',e=>{if(e.target.name==='avatar'){state.avatar=e.target.value;save();}const p=e.target.dataset.pref;if(p&&p in state.prefs){state.prefs[p]=e.target.checked;save();applyPrefs();if(p==='music')updateMusic();}});
- document.addEventListener('input',e=>{if(e.target.id==='photo-slider'){const v=+e.target.value;$('#photo-before').style.clipPath=`inset(0 ${100-v}% 0 0)`;if(v<5)photosSeen.add('despues');if(v>95)photosSeen.add('antes');if(photosSeen.size===2){state.compared=true;save();$('#photo-status').textContent='¡COMPARACIÓN GUARDADA! ¿CÓMO EXPLICARÍAS EL CAMBIO CON TUS PICTOGRAMAS?';}}});
- document.addEventListener('keydown',e=>{if(active||!$('#player')||e.target.matches('input,textarea,select'))return;const d={ArrowLeft:'left',ArrowRight:'right',ArrowUp:'up',ArrowDown:'down',a:'left',d:'right',w:'up',s:'down'}[e.key];if(d){e.preventDefault();walk(d);}else if(e.key.toLowerCase()==='e'){e.preventDefault();if(nearId)approach(nearId);}else if(e.key===' '&&!e.target.closest('button')){e.preventDefault();jump();}});
- document.addEventListener('pointerdown',e=>{const b=e.target.closest('[data-move]');if(!b)return;e.preventDefault();b.setPointerCapture(e.pointerId);walk(b.dataset.move);stopWalking();holdTimer=setInterval(()=>walk(b.dataset.move),70);});document.addEventListener('pointerup',stopWalking);document.addEventListener('pointercancel',stopWalking);window.addEventListener('blur',stopWalking);
- document.addEventListener('dragstart',e=>{const d=e.target.closest('[data-drag]');if(d){tool=d.dataset.drag;e.dataTransfer.setData('text/plain',tool);e.dataTransfer.effectAllowed='copy';}});document.addEventListener('dragover',e=>{if(e.target.closest('[data-drop]'))e.preventDefault();});document.addEventListener('drop',e=>{const t=e.target.closest('[data-drop]');if(!t||!active)return;e.preventDefault();const id=e.dataTransfer.getData('text/plain');if(!A.pictos[id])return;if(t.dataset.drop==='model')useModel(id);else placeSign(id,+t.dataset.drop);});
- $('#activity-close').onclick=close;$('#activity').addEventListener('cancel',e=>{e.preventDefault();close();});document.addEventListener('visibilitychange',()=>{if(document.hidden){stopWalking();clearInterval(musicTimer);window.speechSynthesis?.cancel();}else updateMusic();});window.addEventListener('pagehide',()=>{stopWalking();clearInterval(musicTimer);clearTimeout(approachTimer);});
- window.addEventListener('resize',()=>{if($('#player'))updatePlayer(true);});state.started?world():intro();
+  /* ---------------- guardado ---------------- */
+  function load() { try { const raw = localStorage.getItem(M.KEY); if (raw) return M.validate(JSON.parse(raw)); } catch (e) { } const s = M.initial(); if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) s.prefs.rm = true; return s; }
+  let S = load(); G.S = () => S;
+  let saveT = 0;
+  function save() { clearTimeout(saveT); saveT = setTimeout(saveNow, 120); }
+  function saveNow() { clearTimeout(saveT); try { S.updated = Date.now(); localStorage.setItem(M.KEY, JSON.stringify(S)); } catch (e) { } }
+  function resetAdventure() {
+    const prefs = Object.assign({}, S.prefs);
+    try { localStorage.removeItem(M.KEY); M.OLD_KEYS.forEach(k => localStorage.removeItem(k)); } catch (e) { }
+    S = M.initial(); S.prefs = prefs; G.S = () => S;
+    closeActivity(); stopVoice(); applyPrefs(); showStart();
+    announce('La aventura se reinició. Los otros juegos de la página no cambiaron.');
+  }
+  G.save = save; G.saveNow = saveNow; G.reset = resetAdventure;
+
+  /* ---------------- utilidades ---------------- */
+  function announce(t) { const a = $('#announcement'); if (!a) return; a.textContent = ''; setTimeout(() => { a.textContent = t; }, 40); }
+  function toast(t, kind) { const el = $('#toast'); el.textContent = t; el.className = 'show ' + (kind || ''); clearTimeout(toast.t); toast.t = setTimeout(() => { el.className = ''; }, 3600); announce(t); }
+  function imgLabel(img) { const [t, id] = (img || '').split(':'); return t === 'p' ? M.PICTOS[id] : t === 'i' ? M.ILUS[id].n : ''; }
+  function imgHTML(img, cls) {
+    if (!img) return '';
+    const t = img.split(':')[0];
+    return `<img draggable="false" class="${cls || ''} ${t === 'p' ? 'is-picto' : 'is-ilu'}" src="${D.imgHref(img)}" alt="${esc((t === 'p' ? 'Pictograma: ' : 'Ilustración: ') + imgLabel(img))}">`;
+  }
+  G.announce = announce; G.toast = toast; G.imgHTML = imgHTML; G.imgLabel = imgLabel;
+
+  /* ---------------- preferencias ---------------- */
+  function applyPrefs() {
+    const b = document.body.classList;
+    b.toggle('rm', !!S.prefs.rm); b.toggle('hc', !!S.prefs.hc); b.toggle('big', !!S.prefs.big);
+    b.toggle('mode-detective', S.mode === 'detective'); b.toggle('mode-acomp', S.mode !== 'detective');
+    music(S.prefs.musica);
+  }
+  G.applyPrefs = applyPrefs;
+
+  /* ---------------- sonido (opcional) ---------------- */
+  const SND = { ctx: null, master: null, timer: 0, step: 0 };
+  function audio() {
+    if (SND.ctx) { if (SND.ctx.state === 'suspended') SND.ctx.resume(); return SND.ctx; }
+    const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return null;
+    try { SND.ctx = new AC(); SND.master = SND.ctx.createGain(); SND.master.gain.value = .5; SND.master.connect(SND.ctx.destination); } catch (e) { return null; }
+    return SND.ctx;
+  }
+  G.audio = audio;
+  function tone(f, t, d, type, v) { const c = SND.ctx, o = c.createOscillator(), g = c.createGain(); o.type = type || 'sine'; o.frequency.value = f; g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(v || .12, t + .02); g.gain.exponentialRampToValueAtTime(.0001, t + d); o.connect(g); g.connect(SND.master); o.start(t); o.stop(t + d + .05); }
+  function noise(t, d, f, v) { const c = SND.ctx, n = Math.floor(c.sampleRate * d), b = c.createBuffer(1, n, c.sampleRate), a = b.getChannelData(0); for (let i = 0; i < n; i++) a[i] = (Math.random() * 2 - 1) * (1 - i / n); const s = c.createBufferSource(), fl = c.createBiquadFilter(), g = c.createGain(); s.buffer = b; fl.type = 'lowpass'; fl.frequency.value = f; g.gain.value = v; s.connect(fl); fl.connect(g); g.connect(SND.master); s.start(t); }
+  const mf = n => 440 * Math.pow(2, (n - 69) / 12);
+  function sfx(k) {
+    if (!S.prefs.sonido || !audio()) return; const t = SND.ctx.currentTime + .03;
+    switch (k) {
+      case 'pick': [76, 83].forEach((n, i) => tone(mf(n), t + i * .09, .3, 'triangle', .1)); break;
+      case 'ok': [72, 76, 79].forEach((n, i) => tone(mf(n), t + i * .08, .35, 'sine', .11)); break;
+      case 'fiesta': [72, 76, 79, 84, 88].forEach((n, i) => tone(mf(n), t + i * .1, .5, 'triangle', .12)); break;
+      case 'suave': tone(mf(67), t, .28, 'sine', .07); break;
+      case 'hmm': tone(mf(64), t, .25, 'sine', .07); tone(mf(62), t + .14, .3, 'sine', .07); break;
+      case 'agua': noise(t, .9, 900, .25); break;
+      case 'cae': noise(t, .5, 300, .5); tone(70, t, .4, 'sine', .25); break;
+      case 'toc': tone(120, t, .12, 'square', .06); tone(110, t + .14, .12, 'square', .06); break;
+      case 'paso': tone(mf(52 + Math.floor(Math.random() * 3)), t, .07, 'sine', .025); break;
+      case 'puerta': tone(mf(60), t, .15, 'triangle', .05); tone(mf(67), t + .1, .2, 'triangle', .05); break;
+    }
+  }
+  function music(on) {
+    clearInterval(SND.timer); SND.timer = 0;
+    if (!on || !audio()) return;
+    const notes = [60, 64, 67, 72, 69, 67, 64, 62, 60, 64, 67, 69, 67, 64, 62, 59];
+    SND.timer = setInterval(() => { if (!S.prefs.musica || speaking) return; const t = SND.ctx.currentTime + .02; tone(mf(notes[SND.step % notes.length]), t, .9, 'triangle', .022); if (SND.step % 4 === 0) tone(mf(notes[SND.step % notes.length] - 24), t, 1.6, 'sine', .02); SND.step++; }, 520);
+  }
+  G.sfx = sfx;
+
+  /* ---------------- voz (opcional) ---------------- */
+  let speaking = false;
+  const VOZ = { marta: [1.05, .98], profe: [.82, .95], tomas: [1.15, 1], sol: [1.25, 1], bruno: [1.1, .98], nico: [1.12, 1.03], rosa: [.95, .9], juli: [1.4, 1.02], lucas: [1.12, .98], mati: [1.2, 1.05] };
+  function pickVoice() { try { const vs = speechSynthesis.getVoices().filter(v => /^es/i.test(v.lang)); return vs.find(v => /es-AR/i.test(v.lang)) || vs.find(v => /es-(419|US|MX)/i.test(v.lang)) || vs[0] || null; } catch (e) { return null; } }
+  function speak(text, who) {
+    if (!('speechSynthesis' in window)) { toast('Este navegador no tiene lectura en voz alta.'); return; }
+    try {
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(String(text).replace(/[«»“”]/g, ''));
+      u.lang = 'es-AR'; const v = pickVoice(); if (v) u.voice = v;
+      const p = VOZ[who] || [1, 1]; u.pitch = p[0]; u.rate = p[1] * .95;
+      u.onstart = () => { speaking = true; }; u.onend = u.onerror = () => { speaking = false; };
+      speechSynthesis.speak(u);
+    } catch (e) { }
+  }
+  function stopVoice() { try { speechSynthesis.cancel(); } catch (e) { } speaking = false; }
+  function autoSpeak(text, who) { if (S.prefs.voz) speak(text, who); }
+  G.speak = speak; G.autoSpeak = autoSpeak; G.stopVoice = stopVoice;
+  document.addEventListener('click', e => { const b = e.target.closest('[data-say]'); if (b) { e.preventDefault(); e.stopPropagation(); speak(b.dataset.say, b.dataset.who); } }, true);
+  const sayBtn = (t, who, lab) => `<button type="button" class="say" data-say="${esc(t)}" ${who ? `data-who="${who}"` : ''} aria-label="${esc(lab || 'Escuchar')}"><span aria-hidden="true">🔊</span></button>`;
+  G.sayBtn = sayBtn;
+
+  /* ---------------- puntos de interés ---------------- */
+  const NEIGHBOR = { mirador: [null, 'escuela'], escuela: ['mirador', 'lab'], lab: ['escuela', 'feria'], feria: ['lab', null] };
+  function spots() {
+    const s = S, a = s.area, L = [];
+    const add = o => L.push(Object.assign({ w: 90, h: 110, y: 440, kind: 'obj' }, o));
+    const [left, right] = NEIGHBOR[a];
+    if (left) add({ id: 'exitL', x: 30, y: 515, w: 60, h: 70, kind: 'exit', label: 'Ir a ' + M.AREA_NAME[left], icon: '←', to: left });
+    if (right) add({ id: 'exitR', x: 970, y: 515, w: 60, h: 70, kind: 'exit', label: 'Ir a ' + M.AREA_NAME[right], icon: '→', to: right });
+    if (a === 'mirador') {
+      add({ id: 'tomas', x: 250, y: 430, w: 90, h: 170, kind: 'npc', label: 'Hablar con Tomás', done: s.a.done });
+      if (!s.pictos.includes('costa')) add({ id: 'banco', x: 135, y: 470, w: 130, h: 70, kind: 'secret', label: 'Mirar debajo del banco' });
+      add({ id: 'cartel', x: 380, y: 360, w: 140, h: 100, label: 'Leer el cartel viejo', done: M.hasEv(s, 'ev-cartel') });
+      add({ id: 'costa', x: 440, y: 290, w: 110, h: 120, label: 'Observar la barranca', done: M.hasEv(s, 'ev-costa') });
+      add({ id: 'raices', x: 530, y: 232, w: 90, h: 70, label: 'Mirar el borde de arriba', done: M.hasEv(s, 'ev-raices') });
+      add({ id: 'base', x: 635, y: 378, w: 150, h: 52, label: 'Mirar la base de la barranca', done: M.hasEv(s, 'ev-hueco') });
+      add({ id: 'agua', x: 770, y: 420, w: 140, h: 50, label: 'Mirar el agua del río', done: M.hasEv(s, 'ev-agua') });
+      add({ id: 'orilla', x: 895, y: 390, w: 120, h: 50, label: 'Mirar la orilla', done: M.hasEv(s, 'ev-caida') });
+    } else if (a === 'escuela') {
+      add({ id: 'corcho', x: 150, y: 230, w: 170, h: 150, label: 'Ordenar la explicación en el corcho', done: s.d.done });
+      if (!s.b.done) add({ id: 'nico', x: 280, y: 430, w: 90, h: 170, kind: 'npc', label: 'Hablar con Nico' });
+      add({ id: 'mesa', x: 400, y: 420, w: 170, h: 80, label: 'Mesa de pistas', done: s.b.done });
+      if (!s.d.done) add({ id: 'marta', x: 548, y: 430, w: 90, h: 170, kind: 'npc', label: 'Hablar con la Seño Marta' });
+      if (!s.g.done) add({ id: 'sol', x: 668, y: 430, w: 90, h: 170, kind: 'npc', label: 'Hablar con Sol' });
+      if (!s.pictos.includes('escuchar')) add({ id: 'maceta', x: 712, y: 232, w: 70, h: 70, kind: 'secret', label: 'Mirar detrás de la maceta' });
+      add({ id: 'ventana', x: 790, y: 140, w: 120, h: 120, label: 'Mirar por la ventana' });
+      if (!s.d.done) add({ id: 'bruno', x: 830, y: 430, w: 110, h: 170, kind: 'npc', label: 'Hablar con Bruno' });
+      if (!M.has(s, 'tijera')) add({ id: 'armario', x: 930, y: 380, w: 110, h: 100, kind: 'secret', label: 'Abrir el cajón del armario' });
+    } else if (a === 'lab') {
+      if (!M.has(s, 'lupa')) add({ id: 'cajonera', x: 140, y: 385, w: 140, h: 110, kind: 'secret', label: 'Abrir la cajonera' });
+      add({ id: 'profe', x: 330, y: 430, w: 90, h: 170, kind: 'npc', label: 'Hablar con el profe Daniel' });
+      add({ id: 'afiche', x: 330, y: 170, w: 140, h: 110, label: 'Leer el afiche del modelo' });
+      add({ id: 'maqueta', x: 580, y: 320, w: 300, h: 120, label: 'Usar la maqueta', done: s.c.done });
+      if (s.b.done && !s.c.done) add({ id: 'nico', x: 780, y: 430, w: 90, h: 170, kind: 'npc', label: 'Hablar con Nico' });
+      if (!s.pictos.includes('investigar')) add({ id: 'estante', x: 900, y: 200, w: 120, h: 80, kind: 'secret', label: 'Revisar el estante' });
+    } else if (a === 'feria') {
+      if (s.d.done) add({ id: 'marta', x: 110, y: 430, w: 90, h: 170, kind: 'npc', label: 'Hablar con la Seño Marta' });
+      add({ id: 'planetas', x: 130, y: 250, w: 170, h: 110, label: 'Mirar el stand de los planetas' });
+      add({ id: 'ensayo', x: 240, y: 330, w: 110, h: 150, label: 'Leer el cartel del ensayo', done: M.hasEv(s, 'ev-ensayo') });
+      if (s.d.done) add({ id: 'bruno', x: 345, y: 440, w: 90, h: 160, kind: 'npc', label: 'Hablar con Bruno' });
+      add({ id: 'stand', x: 520, y: 300, w: 240, h: 240, label: s.e.done ? 'Revisar el cartel del stand' : 'Armar el cartel del stand', done: s.f.done });
+      if (s.c.done) add({ id: 'nico', x: 640, y: 450, w: 80, h: 150, kind: 'npc', label: 'Hablar con Nico' });
+      add({ id: 'visitantes', x: 800, y: 440, w: 220, h: 170, kind: 'npc', label: 'Hablar con los visitantes', done: s.f.done });
+      if (!s.pictos.includes('comunicar')) add({ id: 'telon', x: 945, y: 330, w: 90, h: 200, kind: 'secret', label: 'Mirar detrás del telón' });
+    }
+    return L;
+  }
+  G.spots = spots;
+
+  /* ---------------- pantalla de juego ---------------- */
+  const P = { x: 500, y: 505, tx: null, ty: null, dir: 1, walking: false, pending: null };
+  const keys = {};
+  let busy = false;
+  let revealed = {};
+  G.isBusy = () => busy;
+
+  function shell() {
+    $('#game').innerHTML = `
+    <header class="topbar">
+      <button type="button" class="tb-b tb-home" id="b-home" aria-label="Volver al inicio de Misión Inclusión"><span aria-hidden="true">⌂</span><span class="tb-l">Inicio</span></button>
+      <div class="tb-title"><strong>El mensaje perdido del Bermejo</strong><span id="area-name"></span></div>
+      <nav class="tb-nav" aria-label="Herramientas del juego">
+        <button type="button" id="b-obj" class="tb-b"><span aria-hidden="true">🎯</span><span class="tb-l">Objetivos</span></button>
+        <button type="button" id="b-mochila" class="tb-b"><span aria-hidden="true">🎒</span><span class="tb-l">Mochila</span><span class="badge" id="n-mochila"></span></button>
+        <button type="button" id="b-cuaderno" class="tb-b"><span aria-hidden="true">📓</span><span class="tb-l">Cuaderno</span><span class="badge" id="n-cuaderno"></span></button>
+        <button type="button" id="b-mapa" class="tb-b"><span aria-hidden="true">🗺️</span><span class="tb-l">Mapa</span></button>
+        <button type="button" id="b-ayuda" class="tb-b"><span aria-hidden="true">💡</span><span class="tb-l">Ayuda</span></button>
+        <button type="button" id="b-ajustes" class="tb-b"><span aria-hidden="true">⚙️</span><span class="tb-l">Ajustes</span></button>
+      </nav>
+    </header>
+    <main class="world" id="world">
+      <div class="goal" id="goal"></div>
+      <div class="viewport" id="vp"><div class="stage" id="stage"><div id="scene"></div><div class="spots" id="spots"></div><div class="player" id="player" aria-hidden="true"></div><div class="help-arrow" id="help-arrow" hidden aria-hidden="true">⬇</div></div></div>
+      <div class="prompt" id="prompt" hidden></div>
+      <section class="talk" id="talk" hidden aria-live="polite" aria-label="Conversación"></section>
+    </main>
+    <div class="pad" id="pad" role="group" aria-label="Controles para moverse">
+      <div class="pad-dir">
+        <button type="button" class="pad-b" data-k="left" aria-label="Caminar a la izquierda">◀</button>
+        <button type="button" class="pad-b" data-k="up" aria-label="Caminar hacia el fondo">▲</button>
+        <button type="button" class="pad-b" data-k="down" aria-label="Caminar hacia adelante">▼</button>
+        <button type="button" class="pad-b" data-k="right" aria-label="Caminar a la derecha">▶</button>
+      </div>
+      <button type="button" class="pad-act" id="b-act" disabled><span aria-hidden="true">✋</span> <span id="b-act-l">Acercate a algo</span></button>
+    </div>`;
+    $('#b-home').onclick = goHome;
+    $('#b-obj').onclick = () => G.openPanel('objetivos');
+    $('#b-mochila').onclick = () => G.openPanel('mochila');
+    $('#b-cuaderno').onclick = () => G.openPanel('cuaderno');
+    $('#b-mapa').onclick = () => G.openPanel('mapa');
+    $('#b-ajustes').onclick = () => G.openPanel('ajustes');
+    $('#b-ayuda').onclick = worldHelp;
+    $('#b-act').onclick = () => { const n = nearest(); if (n) interact(n); };
+    $$('.pad-b').forEach(b => {
+      const k = b.dataset.k;
+      const on = e => { e.preventDefault(); keys[k] = true; P.tx = null; P.pending = null; loop(); };
+      const off = () => { keys[k] = false; };
+      b.addEventListener('pointerdown', on); b.addEventListener('pointerup', off); b.addEventListener('pointerleave', off); b.addEventListener('pointercancel', off);
+      b.addEventListener('contextmenu', e => e.preventDefault());
+      b.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); keys[k] = true; loop(); } });
+      b.addEventListener('keyup', e => { if (e.key === 'Enter' || e.key === ' ') keys[k] = false; });
+    });
+    $('#vp').addEventListener('click', e => {
+      if (busy || e.target.closest('.spot')) return;
+      const r = $('#stage').getBoundingClientRect();
+      const x = (e.clientX - r.left) / r.width * D.W, y = (e.clientY - r.top) / r.height * D.H;
+      if (y > 300) walkTo(x, Math.max(470, Math.min(540, y)), null);
+    });
+    window.addEventListener('resize', layout);
+  }
+
+  function enterWorld() {
+    shell(); P.x = S.x; P.y = S.y; renderAll(); layout(); setTimeout(layout, 60);
+    $('#game').focus({ preventScroll: true });
+    if (!S.flags.intro) setTimeout(() => interact(spots().find(q => q.id === 'marta')), 450);
+  }
+  G.enterWorld = enterWorld;
+
+  function renderAll() { renderScene(); renderPlayer(); renderHUD(); }
+  G.refresh = () => { if ($('#scene')) { renderScene(); renderHUD(); } };
+  function renderScene() {
+    $('#scene').innerHTML = D.scene(S.area, S, M);
+    $('#area-name').textContent = M.AREA_NAME[S.area];
+    renderSpots();
+  }
+  function renderSpots() {
+    const cfg = M.cfg(S), box = $('#spots'); if (!box) return;
+    const foc = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.spot : null;
+    box.innerHTML = spots().map(q => {
+      const near = Math.abs(q.x - P.x) < 170, secret = q.kind === 'secret';
+      if (secret && !cfg.markers && !near && !revealed[q.id]) return '';
+      const mark = q.kind === 'exit' ? '' : (q.done ? '<span class="spot-ok" aria-hidden="true">✓</span>' : ((cfg.markers || revealed[q.id] || secret) ? '<span class="spot-mark" aria-hidden="true">✦</span>' : ''));
+      return `<button type="button" class="spot spot-${q.kind}${revealed[q.id] ? ' revealed' : ''}" data-spot="${q.id}" style="left:${q.x / 10}%;top:${q.y / 5.6}%;width:${q.w / 10}%;height:${q.h / 5.6}%" aria-label="${esc(q.label + (q.done ? ' (ya revisado)' : ''))}">${q.icon ? `<span class="spot-ic" aria-hidden="true">${q.icon}</span>` : ''}${mark}<span class="spot-tip" aria-hidden="true">${esc(q.label)}</span></button>`;
+    }).join('');
+    $$('.spot', box).forEach(b => {
+      b.onclick = e => { e.stopPropagation(); if (busy) return; const q = spots().find(z => z.id === b.dataset.spot); if (!q) return; goAndInteract(q); };
+      b.onfocus = () => center(b.dataset.spot);
+    });
+    if (foc) { const f = $(`[data-spot="${foc}"]`, box); if (f) f.focus({ preventScroll: true }); }
+    updatePrompt();
+  }
+  function goAndInteract(q) {
+    if (q.kind === 'exit') { interact(q); return; }
+    const tx = clampX(q.x + (q.x > P.x ? -45 : 45));
+    if (S.prefs.rm || Math.abs(q.x - P.x) < 95) { P.x = tx; P.dir = q.x >= P.x ? 1 : -1; renderPlayer(); interact(q); } else walkTo(tx, P.y, q);
+  }
+  function center(id) { const q = spots().find(z => z.id === id); if (q) pan(q.x); }
+  function renderHUD() {
+    const q = M.current(S), g = $('#goal'); if (!g) return;
+    g.innerHTML = q ? `<span class="goal-ic" aria-hidden="true">🎯</span><span class="goal-t">${esc(q.t)}</span>${sayBtn(q.t, null, 'Escuchar el objetivo')}` : `<span class="goal-ic" aria-hidden="true">🎉</span><span class="goal-t">¡Misión cumplida! Podés seguir explorando o probar otras formas de comunicar.</span>`;
+    $('#n-mochila').textContent = (S.items.length + S.pictos.length) || '';
+    $('#n-cuaderno').textContent = S.ev.length || '';
+  }
+  G.renderHUD = renderHUD;
+
+  function renderPlayer() {
+    const el = $('#player'); if (!el) return;
+    if (el.dataset.av !== S.avatar) { el.innerHTML = `<div class="pl-in">${D.avatar(S.avatar, { expr: 'contento' })}</div>`; el.dataset.av = S.avatar; }
+    el.style.left = (P.x / 10) + '%'; el.style.top = (P.y / 5.6) + '%';
+    el.style.setProperty('--sc', (.92 + (P.y - 470) / 70 * .12).toFixed(3));
+    el.classList.toggle('walk', P.walking && !S.prefs.rm); el.classList.toggle('flip', P.dir < 0);
+    el.style.zIndex = 2;
+    pan(P.x);
+  }
+  let scale = 1, offX = 0;
+  function layout() {
+    const vp = $('#vp'); if (!vp) return;
+    const W = vp.clientWidth, H = vp.clientHeight;
+    let sc = Math.min(W / D.W, H / D.H);
+    if (W / D.W < H / D.H * .8) sc = Math.min(H / D.H, (W / D.W) * 2.4);
+    scale = sc;
+    const st = $('#stage'); st.style.width = (D.W * sc) + 'px'; st.style.height = (D.H * sc) + 'px';
+    st.style.top = Math.max(0, (H - D.H * sc) / 2) + 'px';
+    pan(P.x, true);
+  }
+  function pan(x, force) {
+    const vp = $('#vp'), st = $('#stage'); if (!vp || !st) return;
+    const W = vp.clientWidth, sw = D.W * scale;
+    const o = sw <= W ? (W - sw) / 2 : Math.max(W - sw, Math.min(0, W / 2 - x * scale));
+    if (force || Math.abs(o - offX) > .5) { offX = o; st.style.transform = `translateX(${o}px)`; }
+  }
+  const clampX = x => Math.max(40, Math.min(960, x));
+
+  /* ---------------- movimiento ---------------- */
+  let raf = 0, last = 0, stepT = 0, lastSpotsX = -999;
+  function walkTo(x, y, spot) { P.tx = clampX(x); P.ty = y; P.pending = spot; if (S.prefs.rm) { P.dir = P.tx >= P.x ? 1 : -1; P.x = P.tx; P.y = P.ty; P.tx = null; arrive(); return; } loop(); }
+  G.walkTo = walkTo;
+  function loop() { if (!raf) { last = performance.now(); raf = requestAnimationFrame(tick); } }
+  function tick(now) {
+    raf = 0; const dt = Math.min(.05, (now - last) / 1000); last = now;
+    if (busy || $('#activity').open) { P.walking = false; renderPlayer(); return; }
+    let dx = 0, dy = 0;
+    if (keys.left) dx -= 1; if (keys.right) dx += 1; if (keys.up) dy -= 1; if (keys.down) dy += 1;
+    if (dx || dy) { P.tx = null; P.pending = null; }
+    else if (P.tx != null) { const ex = P.tx - P.x, ey = (P.ty == null ? P.y : P.ty) - P.y, d = Math.hypot(ex, ey); if (d < 6) { P.x = P.tx; P.tx = null; arrive(); return; } dx = ex / d; dy = ey / d; }
+    if (dx || dy) {
+      P.walking = true; if (dx) P.dir = dx > 0 ? 1 : -1;
+      P.x += dx * 300 * dt; P.y = Math.max(470, Math.min(540, P.y + dy * 150 * dt));
+      if (P.x < 34 && keys.left && NEIGHBOR[S.area][0]) { travel(NEIGHBOR[S.area][0], 'right'); return; }
+      if (P.x > 966 && keys.right && NEIGHBOR[S.area][1]) { travel(NEIGHBOR[S.area][1], 'left'); return; }
+      P.x = clampX(P.x);
+      stepT += dt; if (stepT > .32) { stepT = 0; sfx('paso'); }
+      renderPlayer(); updatePrompt(); if (Math.abs(lastSpotsX - P.x) > 60) { lastSpotsX = P.x; renderSpots(); }
+      raf = requestAnimationFrame(tick);
+    } else { P.walking = false; renderPlayer(); S.x = P.x; S.y = P.y; save(); renderSpots(); }
+  }
+  function arrive() { const q = P.pending; P.pending = null; P.walking = false; renderPlayer(); S.x = P.x; S.y = P.y; save(); renderSpots(); if (q) interact(q); }
+  function travel(to, side) {
+    stopVoice(); sfx('puerta');
+    S.area = to; P.x = side === 'right' ? 920 : side === 'left' ? 80 : 500; P.y = 505; P.tx = null; P.pending = null;
+    Object.keys(keys).forEach(k => { keys[k] = false; });
+    S.x = P.x; S.y = P.y; revealed = {}; save();
+    const sc = $('#scene'); if (sc && !S.prefs.rm) { sc.classList.remove('fade'); void sc.offsetWidth; sc.classList.add('fade'); }
+    renderAll(); layout(); lastSpotsX = P.x;
+    const q = M.current(S);
+    announce('Llegaste a: ' + M.AREA_NAME[to] + '. ' + (q && q.area === to ? 'Objetivo: ' + q.t : ''));
+    if (to === 'feria' && !S.flags.feriaVista) { S.flags.feriaVista = true; save(); setTimeout(() => say([{ who: 'narra', t: 'La feria de ciencias. El stand «El río se lleva mi pueblo» está vacío y sus papeles quedaron mezclados. Algunos visitantes ya esperan.' }]), 350); }
+  }
+  G.travel = travel;
+
+  function nearest() {
+    let best = null, bd = 1e9;
+    for (const q of spots()) { if (q.kind === 'secret' && !M.cfg(S).markers && Math.abs(q.x - P.x) > 170 && !revealed[q.id]) continue; const d = Math.abs(q.x - P.x) + (q.kind === 'exit' ? 25 : 0); if (d < 85 && d < bd) { bd = d; best = q; } }
+    return best;
+  }
+  function updatePrompt() {
+    const n = busy ? null : nearest(), pr = $('#prompt'), b = $('#b-act'); if (!pr) return;
+    $$('#spots .spot.near').forEach(x => x.classList.remove('near'));
+    if (n) { pr.hidden = false; pr.innerHTML = `<kbd>E</kbd> ${esc(n.label)}`; b.disabled = false; $('#b-act-l').textContent = n.label; const el = $(`#spots [data-spot="${n.id}"]`); if (el) el.classList.add('near'); }
+    else { pr.hidden = true; b.disabled = true; $('#b-act-l').textContent = 'Acercate a algo'; }
+  }
+
+  /* teclado */
+  const KMAP = { ArrowLeft: 'left', a: 'left', A: 'left', ArrowRight: 'right', d: 'right', D: 'right', ArrowUp: 'up', w: 'up', W: 'up', ArrowDown: 'down', s: 'down', S: 'down' };
+  document.addEventListener('keydown', e => {
+    if (!$('#world') || $('#activity').open || e.altKey || e.ctrlKey || e.metaKey) return;
+    const t = e.target;
+    if (t && /INPUT|TEXTAREA|SELECT/.test(t.tagName)) return;
+    if (busy) { if (e.key === 'Escape') G.talkClose(); return; }
+    const k = KMAP[e.key];
+    if (k) { if (t && t.closest && t.closest('.talk, nav, .goal')) return; e.preventDefault(); keys[k] = true; P.tx = null; loop(); return; }
+    if (e.key === 'e' || e.key === 'E' || ((e.key === 'Enter' || e.key === ' ') && (t === document.body || t.id === 'game'))) { const n = nearest(); if (n) { e.preventDefault(); interact(n); } }
+  });
+  document.addEventListener('keyup', e => { const k = KMAP[e.key]; if (k) keys[k] = false; });
+  window.addEventListener('blur', () => Object.keys(keys).forEach(k => { keys[k] = false; }));
+
+  /* ---------------- conversaciones ---------------- */
+  let talkResolve = null;
+  function say(lines) {
+    return new Promise(res => {
+      if (talkResolve) { const r = talkResolve; talkResolve = null; r(-1); }
+      busy = true; updatePrompt();
+      let i = 0; const box = $('#talk');
+      const show = () => {
+        const l = lines[i]; if (!l) { finish(-1); return; }
+        const npc = l.who !== 'narra' && l.who !== 'yo';
+        const name = l.who === 'narra' ? 'Misión' : l.who === 'yo' ? 'Vos' : (C.CAST[l.who] ? C.CAST[l.who].n : l.who);
+        const port = l.who === 'narra' ? '<div class="portrait narra" aria-hidden="true">✦</div>' : `<div class="portrait" aria-hidden="true">${D.portrait(l.who === 'yo' ? S.avatar : l.who, l.e || 'contento')}</div>`;
+        const opts = l.opts ? l.opts.map((o, k) => `<button type="button" class="opt${l.asked && l.asked.includes(k) ? ' asked' : ''}" data-o="${k}">${esc(o)}</button>`).join('') : `<button type="button" class="opt primary" data-o="next">${i < lines.length - 1 ? 'Seguir ▸' : 'Listo'}</button>`;
+        box.innerHTML = `<div class="talk-in">${port}<div class="talk-body"><p class="talk-name">${esc(name)}${npc ? ' <span class="tag-juego">personaje del juego</span>' : ''}</p><p class="talk-t">${esc(l.t)} ${sayBtn(l.t, l.who)}</p>${l.html || ''}<div class="talk-opts">${opts}</div></div></div>`;
+        box.hidden = false;
+        autoSpeak(l.t, l.who);
+        $$('.opt', box).forEach(b => b.onclick = () => { sfx('suave'); const o = b.dataset.o; if (o === 'next') { i++; show(); } else finish(+o); });
+        const f = $('.opt', box); if (f) f.focus({ preventScroll: true });
+      };
+      const finish = v => { talkResolve = null; box.hidden = true; box.innerHTML = ''; busy = false; updatePrompt(); if (!$('#activity').open) $('#game').focus({ preventScroll: true }); res(v); };
+      talkResolve = res; show();
+    });
+  }
+  G.say = say;
+  G.talkClose = () => { const box = $('#talk'); if (box) { box.hidden = true; box.innerHTML = ''; } busy = false; if (talkResolve) { const r = talkResolve; talkResolve = null; r(-1); } updatePrompt(); };
+  /* menú de preguntas: se repite hasta elegir una opción final */
+  async function menu(who, e, t, options) {
+    const asked = []; let txt = t;
+    for (; ;) {
+      const k = await say([{ who, e, t: txt, opts: options.map(o => o.q), asked }]);
+      if (k < 0) return;
+      const o = options[k]; if (!asked.includes(k)) asked.push(k);
+      if (o.lines) { const ls = typeof o.lines === 'function' ? o.lines() : o.lines; if (o.end) { await say(ls); } else { if (ls.length > 1) await say(ls.slice(0, -1)); txt = ls[ls.length - 1].t; e = ls[ls.length - 1].e || e; who = ls[ls.length - 1].who || who; } }
+      if (o.run) { const r = await o.run(); if (r === 'stop') return; }
+      if (o.end) return;
+    }
+  }
+  G.menu = menu;
+
+  /* ---------------- interacción ---------------- */
+  function gain(kind, id, msg) {
+    let ok = false;
+    if (kind === 'item') ok = M.give(S, id); else if (kind === 'ev') ok = M.addEv(S, id); else if (kind === 'picto') ok = M.addPicto(S, id);
+    if (ok) { sfx('pick'); if (msg) toast(msg, 'gain'); save(); G.refresh(); }
+    return ok;
+  }
+  G.gain = gain;
+  function interact(q) {
+    if (!q || busy) return;
+    if (q.kind === 'exit') { travel(q.to, q.id === 'exitL' ? 'right' : 'left'); return; }
+    if (revealed[q.id]) { revealed[q.id] = false; }
+    const h = G.handlers[q.id + '@' + S.area] || G.handlers[q.id];
+    if (h) Promise.resolve(h(q)).then(() => { G.refresh(); });
+  }
+  G.interact = interact;
+
+  async function useTool(need, okFn, sinTexto) {
+    const opts = S.items.filter(i => i !== 'cuaderno');
+    if (!opts.length) { await say([{ who: 'narra', t: sinTexto }]); return; }
+    const k = await say([{ who: 'narra', t: 'Desde acá no se distingue bien. ¿Querés usar algo de la mochila?', opts: opts.map(i => 'Usar: ' + M.ITEMS[i].n).concat(['Solo mirar']) }]);
+    if (k < 0 || k >= opts.length) { await say([{ who: 'narra', t: sinTexto }]); return; }
+    if (opts[k] !== need) { sfx('hmm'); await say([{ who: 'narra', t: 'Con ' + M.ITEMS[opts[k]].n.toLowerCase() + ' no se ve mejor de lejos. ¿Qué otra cosa podría servir?' }]); return; }
+    await okFn();
+  }
+  const found = id => `<div class="found">${imgHTML('p:' + id)}<small>Pictograma ARASAAC</small></div>`;
+  const obs = async (t, ev) => { await say([{ who: 'narra', t }]); gain('ev', ev, 'Nueva observación en el cuaderno'); };
+
+  G.handlers = {
+    tomas: () => G.talk.tomas(),
+    banco: async () => { if (gain('picto', 'costa', '¡Encontraste el pictograma COSTA!')) await say([{ who: 'narra', t: 'Debajo del banco había una tarjeta de Sol: el pictograma COSTA. Quedó guardada en tu mochila.', html: found('costa') }]); },
+    cartel: async () => {
+      const t = 'ATENCIÓN: SE SOLICITA A LOS SEÑORES VISITANTES NO TRASPASAR LA BARANDA NI APROXIMARSE AL BORDE DE LA BARRANCA, DADO QUE EL TERRENO PUEDE PRESENTAR INESTABILIDAD Y DESPRENDIMIENTOS…';
+      await say([{ who: 'narra', t: 'El cartel viejo dice:', html: `<p class="old-sign">${t}</p>` }, { who: 'yo', t: 'Mucho texto, todo en mayúsculas y con letras chicas. De lejos cuesta entenderlo. ¿Y si alguien todavía no lee?' }]);
+      gain('ev', 'ev-cartel', 'Anotaste una idea en el cuaderno');
+    },
+    costa: () => obs('Del otro lado del recodo se ve una barranca alta: una pared de tierra con pasto arriba y el agua abajo.', 'ev-costa'),
+    agua: () => obs('El agua se mueve y llega hasta el pie de la barranca. Tiene color marrón.', 'ev-agua'),
+    orilla: () => obs('En la orilla, junto al agua, hay terrones de tierra caída.', 'ev-caida'),
+    base: async () => {
+      if (M.hasEv(S, 'ev-hueco')) { await say([{ who: 'narra', t: 'Ya anotaste los huecos de la base.' }]); return; }
+      await useTool('prismaticos', () => obs('Con los prismáticos se ve clarito: en la base, donde llega el agua, hay huecos como cuevitas.', 'ev-hueco'),
+        M.has(S, 'prismaticos') ? 'La base está lejos y se ve borrosa.' : 'La base está lejos y se ve borrosa. Algo para mirar de lejos ayudaría… ¿Tomás tendrá algo?');
+    },
+    raices: async () => {
+      if (M.hasEv(S, 'ev-raices')) { await say([{ who: 'narra', t: 'Ya anotaste las raíces del borde.' }]); return; }
+      await useTool('prismaticos', () => obs('Con los prismáticos: debajo del pasto, algunas raíces quedaron colgando en el aire.', 'ev-raices'),
+        M.has(S, 'prismaticos') ? 'El borde de arriba está lejos y se ve borroso.' : 'El borde de arriba está lejos y se ve borroso. Algo para mirar de lejos ayudaría.');
+    },
+    marta: () => G.talk.marta(),
+    sol: () => G.talk.sol(),
+    bruno: () => G.talk.bruno(),
+    nico: () => G.talk.nico(),
+    mesa: async () => { const r = M.prereq(S, 'b'); if (r) { await say([{ who: 'narra', t: 'En la mesa de pistas se ordenan las observaciones. ' + r }]); return; } G.acts.classify(); },
+    corcho: async () => { const r = M.prereq(S, 'd'); if (r) { await say([{ who: 'narra', t: 'En el corcho están las tarjetas mezcladas del stand. ' + r }]); return; } G.acts.sequence(); },
+    maceta: async () => { if (gain('picto', 'escuchar', '¡Encontraste el pictograma ESCUCHAR!')) await say([{ who: 'narra', t: 'Detrás de la maceta había otra tarjeta de Sol: ESCUCHAR.', html: found('escuchar') }]); },
+    ventana: () => say([{ who: 'narra', t: 'Desde la ventana se ve el río a lo lejos. El Mirador queda hacia la izquierda; el laboratorio y la feria, hacia la derecha.' }]),
+    armario: async () => { if (gain('item', 'tijera', 'Guardaste una tijera en la mochila')) await say([{ who: 'narra', t: 'En el cajón del armario hay una tijera de papel. Sirve para dividir un texto largo en partes cortas.' }]); },
+    profe: () => G.talk.profe(),
+    afiche: () => say([{ who: 'narra', t: 'El afiche dice: «MODELO SIMPLIFICADO. Una maqueta ayuda a pensar cómo pasan las cosas, pero no es el río real».' }]),
+    maqueta: async () => { const r = M.prereq(S, 'c'); if (r) { await say([{ who: 'profe', e: 'contento', t: r }]); return; } G.acts.maqueta(); },
+    cajonera: async () => { if (gain('item', 'lupa', 'Guardaste una lupa en la mochila')) await say([{ who: 'narra', t: 'En la cajonera hay una lupa. Sirve para ver detalles pequeños… por ejemplo, en la maqueta.' }]); },
+    estante: async () => { if (gain('picto', 'investigar', '¡Encontraste el pictograma INVESTIGAR!')) await say([{ who: 'narra', t: 'Entre los frascos del estante había una tarjeta de Sol: INVESTIGAR.', html: found('investigar') }]); },
+    planetas: () => say([{ who: 'narra', t: 'Otro grupo explica los planetas con una maqueta, dibujos grandes y palabras cortas. ¡Se entiende desde lejos!' }]),
+    ensayo: async () => {
+      await say([{ who: 'narra', t: 'Es el cartel que se usó en el ensayo. Tiene un solo bloque de texto, sin imágenes ni audio.', html: '<p class="old-sign small">La erosión de las costas es un proceso en el cual el agua del río, al desplazarse de manera constante y transportar sedimentos, produce el desgaste progresivo de la base de las barrancas, lo cual puede ocasionar…</p>' }, { who: 'marta', e: 'preocupado', t: 'En el ensayo, varias personas pasaron de largo. No era culpa de ellas: el cartel daba la información de una sola manera.' }]);
+      gain('ev', 'ev-ensayo', 'Anotaste una idea en el cuaderno');
+    },
+    stand: async () => { const r = M.prereq(S, 'e'); if (r) { await say([{ who: 'narra', t: 'Los papeles del stand están mezclados. ' + r }]); return; } G.acts.stand(S.e.done ? 'probar' : 'armar'); },
+    visitantes: () => G.talk.visitantes(),
+    telon: async () => { if (gain('picto', 'comunicar', '¡Encontraste el pictograma COMUNICAR!')) await say([{ who: 'narra', t: 'Detrás del telón había una tarjeta de Sol: COMUNICAR.', html: found('comunicar') }]); },
+    'marta@feria': () => G.talk.martaFeria(),
+    'bruno@feria': () => G.talk.brunoFeria(),
+    'nico@feria': () => say([{ who: 'nico', e: 'feliz', t: 'Ahora, cuando tengo una idea, me pregunto: ¿lo vi o lo supongo? Y si se puede, ¡lo pruebo!' }]),
+    'nico@lab': () => G.talk.nicoLab()
+  };
+
+  /* ---------------- ayuda en el mundo (3 niveles) ---------------- */
+  async function worldHelp() {
+    if (busy) return;
+    const q = M.current(S);
+    if (!q) { await say([{ who: 'narra', t: '¡Completaste la misión! Podés volver a cualquier lugar, revisar el cartel o probar otras formas de comunicar.' }]); return; }
+    const key = 'w-' + q.id, lv = M.help(S, key); save();
+    const here = q.area === S.area, dir = M.AREAS.indexOf(q.area) - M.AREAS.indexOf(S.area);
+    if (lv === 1) { await say([{ who: 'narra', t: 'Ayuda 1 de 3 · Orientación: ' + q.t + (here ? ' Es en este lugar.' : ' Queda en: ' + M.AREA_NAME[q.area] + (dir < 0 ? ', hacia la izquierda.' : ', hacia la derecha.')) }]); return; }
+    if (lv === 2) {
+      await say([{ who: 'narra', t: 'Ayuda 2 de 3 · Pista visual: seguí la flecha amarilla.' }]);
+      if (here) { revealed[q.spot] = true; renderSpots(); pointAt(q.spot); } else pointAt(dir < 0 ? 'exitL' : 'exitR');
+      return;
+    }
+    await say([{ who: 'narra', t: 'Ayuda 3 de 3 · Demostración: te acompaño hasta ahí.' }]);
+    M.resetHelp(S, key); save();
+    if (!here) travel(q.area, dir < 0 ? 'right' : 'left');
+    setTimeout(() => { revealed[q.spot] = true; renderSpots(); const sp = spots().find(z => z.id === q.spot); if (sp) { pointAt(sp.id); walkTo(sp.x + (sp.x > P.x ? -45 : 45), 505, null); } }, 250);
+  }
+  function pointAt(id) {
+    const sp = spots().find(z => z.id === id), ar = $('#help-arrow'); if (!sp || !ar) return;
+    ar.hidden = false; ar.style.left = (sp.x / 10) + '%'; ar.style.top = Math.max(2, (sp.y - sp.h / 2) / 5.6 - 9) + '%';
+    pan(sp.x);
+    clearTimeout(pointAt.t); pointAt.t = setTimeout(() => { ar.hidden = true; }, 8000);
+  }
+  G.worldHelp = worldHelp;
+
+  /* ---------------- volver al sitio ---------------- */
+  function goHome() {
+    stopVoice(); saveNow();
+    if (window.parent && window.parent !== window) { try { window.parent.postMessage({ type: 'bermejo:home' }, location.origin); return; } catch (e) { } }
+    location.href = '../';
+  }
+  G.goHome = goHome;
+
+  /* ---------------- ventana de actividades ---------------- */
+  const dlg = () => $('#activity');
+  let actClose = null;
+  function openActivity(title, html, opts) {
+    opts = opts || {};
+    const d = dlg();
+    if (talkResolve) G.talkClose();
+    $('#activity-title').textContent = title;
+    d.className = opts.cls || '';
+    $('#activity-content').innerHTML = html;
+    const hb = $('#activity-help'); hb.hidden = !opts.help; hb.textContent = '';
+    G.helpFn = opts.help || null; if (opts.help) G.setHelpLabel(0);
+    actClose = opts.onClose || null;
+    if (!d.open) { try { d.showModal(); } catch (e) { d.setAttribute('open', ''); } }
+    $('#activity-content').scrollTop = 0;
+    const f = $('[autofocus]', d) || $('#activity-content button'); if (f) f.focus({ preventScroll: true });
+  }
+  function closeActivity() { const d = dlg(); if (d && d.open) d.close(); }
+  G.openActivity = openActivity; G.closeActivity = closeActivity;
+  G.setHelpLabel = n => { const hb = $('#activity-help'); if (hb) hb.innerHTML = `<span aria-hidden="true">💡</span> Ayuda${n ? ` <small>${n}/3</small>` : ''}`; };
+  function setupDialog() {
+    const d = dlg();
+    $('#activity-close').onclick = () => closeActivity();
+    d.addEventListener('close', () => { stopVoice(); const f = actClose; actClose = null; G.helpFn = null; if (f) f(); G.refresh(); const g = $('#game'); if (g) g.focus({ preventScroll: true }); });
+    $('#activity-help').onclick = () => { if (G.helpFn) G.helpFn(); };
+  }
+  G.confirm = (t, yes, yesLabel) => {
+    openActivity('Confirmar', `<div class="confirm"><p>${esc(t)}</p><div class="row"><button type="button" class="primary" id="c-yes">${esc(yesLabel || 'Sí, reiniciar')}</button><button type="button" id="c-no" autofocus>No, volver</button></div></div>`, { cls: 'small' });
+    $('#c-yes').onclick = () => { closeActivity(); yes(); }; $('#c-no').onclick = closeActivity; $('#c-no').focus();
+  };
+
+  /* ---------------- pantalla de inicio ---------------- */
+  const AVATARS = [['luna', 'Luna'], ['mia', 'Mía'], ['caro', 'Caro'], ['joaquin', 'Joaquín']];
+  const HISTORIA = 'La feria de ciencias está por empezar, pero las imágenes y explicaciones del stand quedaron mezcladas. En el ensayo, algunas personas no pudieron usar el cartel. Tu equipo tiene que reunir evidencias, investigar qué pasa en la costa y armar una explicación que todos puedan entender.';
+  function showStart() {
+    const cont = S.started;
+    const demo = M.initial(); demo.d.done = true; demo.c.done = true;
+    $('#game').innerHTML = `<div class="start">
+      <div class="start-art" aria-hidden="true">${D.scene('feria', demo, M)}</div>
+      <div class="start-card">
+        <p class="kicker">Mes de la Inclusión · Escuela 479 · Proyecto «El río se lleva mi pueblo»</p>
+        <h1>El mensaje perdido del Bermejo</h1>
+        <p class="lead">${HISTORIA} ${sayBtn(HISTORIA, null, 'Escuchar la historia')}</p>
+        <fieldset class="pick"><legend>Elegí tu personaje</legend><div class="pick-row">${AVATARS.map(([k, n]) => `<button type="button" class="av${S.avatar === k ? ' on' : ''}" data-av="${k}" aria-pressed="${S.avatar === k}"><span class="av-img" aria-hidden="true">${D.avatar(k, { expr: 'feliz', pose: 'saluda' })}</span><span>${n}</span></button>`).join('')}</div></fieldset>
+        <fieldset class="pick"><legend>Elegí cómo jugar <span class="hint">(se puede cambiar en Ajustes sin perder lo avanzado)</span></legend><div class="mode-row">${Object.entries(M.MODES).map(([k, m]) => `<button type="button" class="mode${S.mode === k ? ' on' : ''}" data-mode="${k}" aria-pressed="${S.mode === k}"><strong><span aria-hidden="true">${k === 'acomp' ? '🧭' : '🔎'}</span> ${m.name}</strong><span>${m.desc}</span></button>`).join('')}</div></fieldset>
+        <div class="start-actions"><button type="button" class="primary big-b" id="b-start">${cont ? 'Continuar la aventura ▸' : 'Empezar la aventura ▸'}</button>${cont ? '<button type="button" id="b-restart">Empezar de nuevo</button>' : ''}<button type="button" id="b-home2">Volver a Misión Inclusión</button></div>
+        <p class="fine">Los personajes, los diálogos y las ilustraciones son inventados para este juego: no son testimonios, datos ni resultados reales de la investigación. Pictogramas: Sergio Palao · ARASAAC · Gobierno de Aragón · CC BY-NC-SA. Se juega con teclado (flechas y E), con mouse o tocando la pantalla.</p>
+      </div></div>`;
+    $$('.av').forEach(b => b.onclick = () => { S.avatar = b.dataset.av; save(); $$('.av').forEach(x => { x.classList.toggle('on', x === b); x.setAttribute('aria-pressed', x === b); }); });
+    $$('.mode').forEach(b => b.onclick = () => { S.mode = b.dataset.mode; save(); applyPrefs(); $$('.mode').forEach(x => { x.classList.toggle('on', x === b); x.setAttribute('aria-pressed', x === b); }); });
+    $('#b-start').onclick = () => { audio(); S.started = true; saveNow(); enterWorld(); };
+    $('#b-home2').onclick = goHome;
+    const r = $('#b-restart'); if (r) r.onclick = () => G.confirm('¿Empezar de nuevo? Se borra el progreso de esta aventura. Los otros juegos de la página no cambian.', resetAdventure);
+    $('#b-start').focus({ preventScroll: true });
+  }
+  G.showStart = showStart;
+
+  function boot() {
+    const bar = $('.dialog-bar');
+    if (bar && !$('#activity-help')) $('#activity-close').insertAdjacentHTML('beforebegin', '<button type="button" id="activity-help" class="help-b" hidden></button>');
+    setupDialog(); applyPrefs();
+    if (location.hash === '#jugar' && S.started) enterWorld(); else showStart();
+    try { speechSynthesis.getVoices(); } catch (e) { }
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else setTimeout(boot);
 })();
